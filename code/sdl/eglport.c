@@ -54,6 +54,28 @@ int fbdev = -1;
 #include "bcm_host.h"
 #endif /* PANDORA */
 
+#ifdef ROCK
+#define USE_SRGB 0
+#include <sys/types.h>
+#include <sys/stat.h>
+#include "assert.h"
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <gbm.h>
+#include "EGL/eglext.h"
+struct gbm_device *gbm;
+struct gbm_surface *surface;
+struct gbm_bo *bo;
+struct drm_fb *fb;
+drmModeModeInfo *mode;
+uint32_t crtc_id, connector_id;
+int dridev;
+#endif
+
 #ifdef USE_SRGB
 #ifndef EGL_GL_COLORSPACE_KHR
 #define EGL_GL_COLORSPACE_KHR                   0x309D
@@ -140,15 +162,21 @@ void EGL_Close( void )
     eglContext = NULL;
     eglDisplay = NULL;
 	
-	eglColorbits = 0;
-	eglDepthbits = 0;
-	eglStencilbits = 0;
+    eglColorbits = 0;
+    eglDepthbits = 0;
+    eglStencilbits = 0;
 
+#ifdef ROCK
+	if( bo ) { gbm_surface_release_buffer(surface, bo); }
+	if( dridev ) { close(dridev); }
+	if( surface ) { gbm_surface_destroy (surface); }
+	if( gbm ) { gbm_device_destroy (gbm); }
+#else
     /* Release platform resources */
     FreeNativeWindow();
     FreeNativeDisplay();
     Platform_Close();
-
+#endif
     CheckEGLErrors( __FILE__, __LINE__ );
 
     printf( "EGLport: Closed\n" );
@@ -176,6 +204,176 @@ void EGL_SwapBuffers( void )
     }
 }
 
+struct drm_fb {
+	struct gbm_bo *bo;
+	uint32_t fb_id;
+};
+
+static uint32_t find_crtc_for_encoder(const drmModeRes *resources,
+				      const drmModeEncoder *encoder) {
+	int i;
+
+	for (i = 0; i < resources->count_crtcs; i++) {
+		const uint32_t crtc_mask = 1 << i;
+		const uint32_t crtc_id = resources->crtcs[i];
+		if (encoder->possible_crtcs & crtc_mask) {
+			return crtc_id;
+		}
+	}
+
+	/* no match found */
+	return -1;
+}
+
+static uint32_t find_crtc_for_connector(const drmModeRes *resources,
+					const drmModeConnector *connector) {
+	int i;
+
+	for (i = 0; i < connector->count_encoders; i++) {
+		const uint32_t encoder_id = connector->encoders[i];
+		drmModeEncoder *encoder = drmModeGetEncoder(dridev, encoder_id);
+
+		if (encoder) {
+			const uint32_t crtc_id = find_crtc_for_encoder(resources, encoder);
+
+			drmModeFreeEncoder(encoder);
+			if (crtc_id != 0) {
+				return crtc_id;
+			}
+		}
+	}
+
+	/* no match found */
+	return -1;
+}
+
+static void
+drm_fb_destroy_callback(struct gbm_bo *bo, void *data)
+{
+	struct drm_fb *fb = data;
+	//struct gbm_device *gbm = gbm_bo_get_device(bo);
+
+	if (fb->fb_id)
+		drmModeRmFB(dridev, fb->fb_id);
+
+	free(fb);
+}
+
+static struct drm_fb * drm_fb_get_from_bo(struct gbm_bo *bo)
+{
+	struct drm_fb *fb = gbm_bo_get_user_data(bo);
+	uint32_t width, height, stride, handle;
+	int ret;
+
+	if (fb)
+		return fb;
+
+	fb = calloc(1, sizeof *fb);
+	fb->bo = bo;
+
+	width = gbm_bo_get_width(bo);
+	height = gbm_bo_get_height(bo);
+	stride = gbm_bo_get_stride(bo);
+	handle = gbm_bo_get_handle(bo).u32;
+
+	ret = drmModeAddFB(dridev, width, height, 24, 32, stride, handle, &fb->fb_id);
+	if (ret) {
+		printf("failed to create fb: %s\n", strerror(errno));
+		free(fb);
+		return NULL;
+	}
+
+	gbm_bo_set_user_data(bo, fb, drm_fb_destroy_callback);
+
+	return fb;
+}
+
+static int init_drm(void)
+{
+	drmModeRes *resources;
+	drmModeConnector *connector = NULL;
+	drmModeEncoder *encoder = NULL;
+
+	int i;
+	const char *x = NULL, *y = NULL;
+
+	// Will later update this to be user-defined
+	x = "800";
+	y = "600";
+
+	int resX = atoi(x), resY = atoi(y);
+	printf("REQUESTING RESOLUTION: %dx%d\n", resX, resY);
+
+	dridev = open("/dev/dri/card0", O_RDWR);
+	if (dridev < 0) {
+		printf("could not open drm device\n");
+		return -1;
+	}
+
+	resources = drmModeGetResources(dridev);
+	if (!resources) {
+		printf("drmModeGetResources failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	// find a connected connector: 
+	for (i = 0; i < resources->count_connectors; i++) {
+		connector = drmModeGetConnector(dridev, resources->connectors[i]);
+		if (connector->connection == DRM_MODE_CONNECTED) {
+			// it's connected, let's use this! 
+			break;
+		}
+		drmModeFreeConnector(connector);
+		connector = NULL;
+	}
+
+	if (!connector) {
+		printf("no connected connector!\n");
+		return -1;
+	}
+
+	connector_id = connector->connector_id;
+
+	// find resolution 
+	for (i = 0; i < connector->count_modes; i++) {
+		drmModeModeInfo *current_mode = &connector->modes[i];
+			
+		if (current_mode->hdisplay <= resX && current_mode->vdisplay <= resY && current_mode->vrefresh <= 61) {
+			mode = current_mode;
+			break;
+		}
+	}
+
+	// if couldn't find requested resolution, cancel and don't change mode 
+	if (!mode) {
+		printf("could not find %dx%d, no mode change\n", resX, resY);
+		return -1;
+	}
+	
+	// find encoder: 
+	for (i = 0; i < resources->count_encoders; i++) {
+		encoder = drmModeGetEncoder(dridev, resources->encoders[i]);
+		if (encoder->encoder_id == connector->encoder_id)
+			break;
+		drmModeFreeEncoder(encoder);
+		encoder = NULL;
+	}
+
+	if (encoder) {
+		printf("Found encoder crtc\n");
+		crtc_id = encoder->crtc_id;
+	} else {
+		uint32_t crtc_id = find_crtc_for_connector(resources, connector);
+		if (crtc_id == 0) {
+			printf("no crtc found!\n");
+			return -1;
+		} else
+			printf("Found crtc for connector\n");
+	}
+
+	return 0;
+}
+
 /** @brief Obtain the system display and initialize EGL
  * @param width : desired pixel width of the window (not used by all platforms)
  * @param height : desired pixel height of the window (not used by all platforms)
@@ -190,7 +388,7 @@ int8_t EGL_Open( uint16_t width, uint16_t height )
 
     static const EGLint contextAttribs[] =
     {
-#if defined(USE_GLES2)
+#if defined(USE_GLES2) || defined(ROCK)
           EGL_CONTEXT_CLIENT_VERSION,     2,
 #endif
           EGL_NONE
@@ -209,6 +407,92 @@ int8_t EGL_Open( uint16_t width, uint16_t height )
 
     /* Check for the cfg file to alternative settings */
     OpenCfg( "eglport.cfg" );
+
+#ifdef ROCK
+
+	init_drm();
+
+	gbm = gbm_create_device(dridev);
+	surface = gbm_surface_create(gbm,
+			800, 600,
+			GBM_FORMAT_XRGB8888,
+			GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+	if (!surface) {
+		printf("EGLport ERROR: failed to create gbm surface\n");
+		return 1;
+	}
+
+	nativeDisplay = (EGLNativeDisplayType)gbm;
+	eglDisplay = peglGetDisplay( nativeDisplay );
+	if (eglDisplay == EGL_NO_DISPLAY) {
+		CheckEGLErrors( __FILE__, __LINE__ );
+		printf( "EGLport ERROR: Unable to create EGL display.\n" );
+		return 1;
+	}
+
+	result = peglInitialize( eglDisplay, &eglMajorVer, &eglMinorVer );
+	if (result != EGL_TRUE ) {
+		CheckEGLErrors( __FILE__, __LINE__ );
+		printf( "EGLport ERROR: Unable to initialize EGL display.\n" );
+		return 1;
+	}
+
+	/* Get EGL Library Information */
+	printf( "EGL Implementation Version: Major %d Minor %d\n", eglMajorVer, eglMinorVer );
+	output = peglQueryString( eglDisplay, EGL_VENDOR );
+	printf( "EGL_VENDOR: %s\n", output );
+	output = peglQueryString( eglDisplay, EGL_VERSION );
+	printf( "EGL_VERSION: %s\n", output );
+	output = peglQueryString( eglDisplay, EGL_EXTENSIONS );
+	printf( "EGL_EXTENSIONS: %s\n", output );
+
+	result = peglBindAPI( EGL_OPENGL_ES_API );
+	if ( result == EGL_FALSE ) {
+		CheckEGLErrors( __FILE__, __LINE__ );
+		printf( "EGLport ERROR: Could not bind EGL API.\n" );
+		return 1;
+	}
+
+	if (FindEGLConfigs() != 0) {
+		printf( "EGLport ERROR: Unable to configure EGL. See previous error.\n" );
+		return 1;
+	}
+	printf( "EGLport: Using Config %d\n", configIndex );
+
+	eglContext = peglCreateContext(eglDisplay, eglConfigs[configIndex], NULL, NULL);
+	if (eglContext == EGL_NO_CONTEXT) {
+		printf("EGLport ERROR: failed to create context\n");
+		return 1;
+	}
+
+	nativeWindow = (EGLNativeWindowType)surface;
+	eglSurface = peglCreateWindowSurface(eglDisplay, eglConfigs[configIndex], (EGLNativeWindowType)surface, NULL);
+	if (eglSurface == EGL_NO_SURFACE) {
+		CheckEGLErrors( __FILE__, __LINE__ );
+		printf( "EGLport ERROR: Unable to create EGL surface!\n" );
+		return 1;
+	}
+
+	printf( "EGLport: Making Current\n" );
+	result = peglMakeCurrent( eglDisplay,  eglSurface,  eglSurface, eglContext );
+	if (result != EGL_TRUE) {
+		CheckEGLErrors( __FILE__, __LINE__ );
+		printf( "EGLport ERROR: Unable to make GLES context current\n" );
+		return 1;
+	}
+
+	eglSwapBuffers(eglDisplay, eglSurface);
+	bo = gbm_surface_lock_front_buffer(surface);
+	fb = drm_fb_get_from_bo(bo);
+
+	if (drmModeSetCrtc(dridev, crtc_id, fb->fb_id, 0, 0, &connector_id, 1, mode)) {
+		printf("failed to set mode: %s\n", strerror(errno));
+		return;
+	}
+
+	drmDropMaster(dridev);
+
+#else // ROCK
 
     /* Setup any platform specific bits */
     Platform_Open();
@@ -330,8 +614,9 @@ int8_t EGL_Open( uint16_t width, uint16_t height )
 	  eglStencilbits = stencil;
 	}
 
-    printf( "EGLport: Complete\n" );
+#endif // ROCK
 
+    printf( "EGLport: Complete\n" );
     CheckEGLErrors( __FILE__, __LINE__ );
 
     return 0;
@@ -363,7 +648,7 @@ void OpenCfg ( const char* file )
 
     /* Set defaults */
 #if defined(USE_EGL_SDL)
-#ifdef PANDORA
+#if defined(PANDORA) && !defined(ROCK)
     eglSettings[CFG_MODE]           = RENDER_RAW;
 #else
     eglSettings[CFG_MODE]           = RENDER_SDL;
@@ -564,7 +849,7 @@ int8_t GetNativeDisplay( void )
     }
     else if (eglSettings[CFG_MODE] == RENDER_SDL)   /* SDL/X11 mode */
     {
-#if defined(USE_EGL_SDL)
+#if defined(USE_EGL_SDL) && !defined(ROCK)
         printf( "EGLport: Opening SDL/X11 display\n" );
         SDL_VERSION(&sysWmInfo.version);
         SDL_GetWMInfo(&sysWmInfo);
@@ -650,7 +935,7 @@ int8_t GetNativeWindow( uint16_t width, uint16_t height )
     }
     else if(eglSettings[CFG_MODE] == RENDER_SDL)    /* SDL/X11 mode */
     {
-#if defined(USE_EGL_SDL)
+#if defined(USE_EGL_SDL) && !defined(ROCK)
         /* SDL_GetWMInfo is populated when display was opened */
         nativeWindow = (NativeWindowType)sysWmInfo.info.x11.window;
 
@@ -705,6 +990,13 @@ void Platform_Open( void )
 #elif defined(RPI)
     bcm_host_init();
 #endif /* PANDORA */
+#ifdef ROCK
+    printf( "EGLport: Opening /dev/dri/card0\n" );
+    dridev = open( "/dev/dri/card0", O_RDWR );
+    if ( dridev < 0 ) {
+        printf( "EGLport ERROR: Couldn't open /dev/dri/card0\n" );
+    }
+#endif
 }
 
 /** @brief Release any system specific resources

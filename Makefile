@@ -385,10 +385,10 @@ else # ifeq Linux
 
 ifeq ($(PLATFORM),pandora)
 
- ifeq ($(ODROID),1)
+ ifeq ($(ROCK),1)
   BASE_CFLAGS = -Wall -fno-strict-aliasing -Wimplicit -Wstrict-prototypes \
-    -pipe -DUSE_ICON -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -fsigned-char \
-    -ftree-vectorize -fsingle-precision-constant
+    -pipe -DUSE_ICON -mcpu=cortex-a53 -mfpu=neon -mfloat-abi=hard -fsigned-char \
+    -ftree-vectorize -fsingle-precision-constant -D_REENTRANT
  else
   ifeq ($(RPI),1)
    BASE_CFLAGS = -Wall -fno-strict-aliasing -Wimplicit -Wstrict-prototypes \
@@ -437,8 +437,8 @@ ifeq ($(PLATFORM),pandora)
   THREAD_LIBS=-lpthread
   LIBS=-ldl -lm
 
- ifeq ($(ODROID),1)
-  CLIENT_LIBS=$(SDL_LIBS) -lGLESv1_CM -lEGL
+ ifeq ($(ROCK),1)
+  CLIENT_LIBS=$(SDL_LIBS) -lGLESv1_CM -lEGL -lrt
  else
   ifeq ($(RPI),1)
    CLIENT_LIBS=$(SDL_LIBS) -L/opt/vc/lib -lGLESv1_CM -lEGL
@@ -476,10 +476,10 @@ ifeq ($(PLATFORM),pandora)
     CLIENT_CFLAGS += -I$(SDLHDIR)/include
   endif
   
- ifeq ($(ODROID),1)
-  BASE_CFLAGS += -DODROID -DARM -DNEON -DHAVE_GLES
+ ifeq ($(ROCK),1)
+  BASE_CFLAGS += -DODROID -DROCK -DARM -DNEON -DHAVE_GLES
  else
-  ifeq ($(ODROID),1)
+  ifeq ($(RPI),1)
    BASE_CFLAGS += -DRPI -DARM -DNEON -DHAVE_GLES
   else
    BASE_CFLAGS += -DPANDORA -DARM -DNEON -DHAVE_GLES
@@ -1249,7 +1249,7 @@ makedirs:
 # QVM BUILD TOOLS
 #############################################################################
 
-TOOLS_OPTIMIZE = -g -O2 -Wall -fno-strict-aliasing
+TOOLS_OPTIMIZE = -g -O3 -Wall -fno-strict-aliasing
 TOOLS_CFLAGS += $(TOOLS_OPTIMIZE) \
                 -DTEMPDIR=\"$(TEMPDIR)\" -DSYSTEM=\"\" \
                 -I$(Q3LCCSRCDIR) \
