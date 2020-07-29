@@ -3,7 +3,6 @@ Based of https://github.com/ptitSeb/OpenArenaPandora
 I have modified the EGL code to run with GBM so that X11 is no longer required.
 To enable this, pass ROCK at compile time.
 
-================
 OpenArena
 ================
 OpenArena version for ROCKCHIP / OpenPandora / ODroid / RPi, featuring ARM support and GLES renderer.
