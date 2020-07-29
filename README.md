@@ -1,7 +1,12 @@
-OpenArenaPandora
-================
+Based of https://github.com/ptitSeb/OpenArenaPandora
 
-OpenArena version for OpenPandora / ODroid / RPi, featuring ARM support and GLES renderer.
+I have modified the EGL code to run with GBM so that X11 is no longer required.
+To enable this, pass ROCK at compile time.
+
+================
+OpenArena
+================
+OpenArena version for ROCKCHIP / OpenPandora / ODroid / RPi, featuring ARM support and GLES renderer.
 
 The current state is playable without any major problems and good performances. 
 Only limits are len flares that requires depth buffer reading and so are disabled.
