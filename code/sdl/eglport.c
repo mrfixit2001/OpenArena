@@ -288,21 +288,14 @@ static struct drm_fb * drm_fb_get_from_bo(struct gbm_bo *bo)
 	return fb;
 }
 
-static int init_drm(void)
+static int init_drm( uint16_t width, uint16_t height )
 {
 	drmModeRes *resources;
 	drmModeConnector *connector = NULL;
 	drmModeEncoder *encoder = NULL;
 
 	int i;
-	const char *x = NULL, *y = NULL;
-
-	// Will later update this to be user-defined
-	x = "800";
-	y = "600";
-
-	int resX = atoi(x), resY = atoi(y);
-	printf("REQUESTING RESOLUTION: %dx%d\n", resX, resY);
+	printf("REQUESTING RESOLUTION: %dx%d\n", width, height);
 
 	dridev = open("/dev/dri/card0", O_RDWR);
 	if (dridev < 0) {
@@ -338,7 +331,7 @@ static int init_drm(void)
 	for (i = 0; i < connector->count_modes; i++) {
 		drmModeModeInfo *current_mode = &connector->modes[i];
 			
-		if (current_mode->hdisplay <= resX && current_mode->vdisplay <= resY && current_mode->vrefresh <= 61) {
+		if (current_mode->hdisplay <= width && current_mode->vdisplay <= height && current_mode->vrefresh <= 61) {
 			mode = current_mode;
 			break;
 		}
@@ -346,7 +339,7 @@ static int init_drm(void)
 
 	// if couldn't find requested resolution, cancel and don't change mode 
 	if (!mode) {
-		printf("could not find %dx%d, no mode change\n", resX, resY);
+		printf("could not find %dx%d, no mode change\n", width, height);
 		return -1;
 	}
 	
@@ -410,11 +403,11 @@ int8_t EGL_Open( uint16_t width, uint16_t height )
 
 #ifdef ROCK
 
-	init_drm();
+	init_drm(width, height);
 
 	gbm = gbm_create_device(dridev);
 	surface = gbm_surface_create(gbm,
-			800, 600,
+			width, height,
 			GBM_FORMAT_XRGB8888,
 			GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 	if (!surface) {
@@ -487,7 +480,7 @@ int8_t EGL_Open( uint16_t width, uint16_t height )
 
 	if (drmModeSetCrtc(dridev, crtc_id, fb->fb_id, 0, 0, &connector_id, 1, mode)) {
 		printf("failed to set mode: %s\n", strerror(errno));
-		return;
+		return 1;
 	}
 
 	drmDropMaster(dridev);
